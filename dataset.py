@@ -1,5 +1,4 @@
 import os
-
 import pandas as pd
 from torch_geometric.data import InMemoryDataset
 import torch
@@ -9,7 +8,7 @@ import pickle
 import dgl
 import rdkit
 from rdkit import Chem
-
+import json
 # protein
 seq_voc = "ACDEFGHIKLMNPQRSTVWXY"
 seq_dict = {v: i + 1 for i, v in enumerate(seq_voc)}
@@ -25,10 +24,28 @@ class DrugOOD(InMemoryDataset):
         super(DrugOOD, self).__init__()
         self.save_path = args.save_graph
         self.dataset = args.dataset
-        self.csv_path = args.root
+        self.root = args.root
         self.max_protein_len = args.max_protein_len
         self.debug = args.DEBUG
+        self.data = self.load_data(args)
         self.process_data()
+
+    def load_data(self, args):
+        """
+        Load raw data
+        """
+        with open(os.path.join(f'{self.root}/{self.dataset}.json')) as f:
+            info = json.load(f)
+        data_train = pd.DataFrame(info['split']['train'])
+        data_val = pd.DataFrame(info['split']['ood_val'])
+        data_test = pd.DataFrame(info['split']['ood_test'])
+        data = dict()
+        if args.DEBUG:
+            data['train'], data['valid'], data['test'] = data_train[:50], data_val[:50], data_test[:50]
+            return data
+        else:
+            data['train'], data['valid'], data['test'] = data_train, data_val, data_test
+            return data
 
     def process_data(self):
         """
@@ -45,56 +62,38 @@ class DrugOOD(InMemoryDataset):
             os.makedirs(f'{self.save_path}', exist_ok=True)
             for dataset in ['train', 'valid', 'test']:
                 print('Processing raw protein-ligand complex data...')
-                data = pd.read_csv(f'{self.csv_path}/{self.dataset}_{dataset}.csv')
-                if self.debug:
-                    data = data[:50]
-                smiles_pos_list = data['smiles_pos'].tolist()
-                labels_pos_list = data['cls_label_pos'].tolist()
-                protein_pos_list = data['protein_pos'].tolist()
-                smiles_neg_list = data['smiles_neg'].tolist()
-                labels_neg_list = data['cls_label_neg'].tolist()
-                protein_neg_list = data['protein_neg'].tolist()
-
+                smiles_list = self.data[dataset]['smiles'].tolist()
+                labels_list = self.data[dataset]['cls_label'].tolist()
+                protein_list = self.data[dataset]['protein'].tolist()
+                print(sum(labels_list) / len(labels_list))
                 escapes = 0
 
-                mol_graphs_pos = []
-                prot_seqs_pos = []
-                labels_pos = []
-                prots_mask_pos = []
-                mol_graphs_neg = []
-                prot_seqs_neg = []
-                labels_neg = []
-                prots_mask_neg = []
-                for i, (smiles_pos, label_pos, seq_pos, smiles_neg, label_neg, seq_neg) in enumerate(
-                        tqdm(zip(smiles_pos_list, labels_pos_list, protein_pos_list, smiles_neg_list, labels_neg_list,
-                                 protein_neg_list))):
-                    try:
-                        graph = self.build_graph(smiles_pos)
-                        mol_graphs_pos.append(graph)
-                        labels_pos.append(label_pos)
-                        prot_emb, prot_mask = self.prot_emb(seq_pos)
-                        prot_seqs_pos.append(prot_emb)
-                        prots_mask_pos.append(prot_mask)
+                mol_graphs = []
+                prot_seqs = []
+                labels = []
+                prots_mask = []
 
-                        graph = self.build_graph(smiles_neg)
-                        mol_graphs_neg.append(graph)
-                        labels_neg.append(label_neg)
-                        prot_emb, prot_mask = self.prot_emb(seq_neg)
-                        prot_seqs_neg.append(prot_emb)
-                        prots_mask_neg.append(prot_mask)
+                for i, (smiles, label, seq) in enumerate(
+                        tqdm(zip(smiles_list, labels_list, protein_list))):
+                    try:
+                        graph = self.build_graph(smiles)
+                        mol_graphs.append(graph)
+                        labels.append(label)
+                        prot_emb, prot_mask = self.prot_emb(seq)
+                        prot_seqs.append(prot_emb)
+                        prots_mask.append(prot_mask)
+
                     except:
                         escapes += 1
                 print(f'[INFO] there are {escapes} mols escapes in {dataset} set')
-                self.save(dataset, mol_graphs_pos, labels_pos, prot_seqs_pos, prots_mask_pos, mol_graphs_neg,
-                          labels_neg, prot_seqs_neg, prots_mask_neg)
+                self.save(dataset, mol_graphs, labels, prot_seqs, prots_mask)
 
     def build_graph(self, smiles):
         """ Build whole graph from smiles sequences """
         mol_graph = self.smiles2graph(smiles)
         return mol_graph
 
-    def save(self, dataset, mol_graphs_pos, labels_pos, prot_seqs_pos, prots_mask_pos, mol_graphs_neg, labels_neg,
-             prot_seqs_neg, prots_mask_neg):
+    def save(self, dataset, mol_graphs, labels, prot_seqs, prots_mask):
         """ Save the generated graphs. """
         print('Saving processed complex data...')
 
@@ -103,8 +102,7 @@ class DrugOOD(InMemoryDataset):
         else:
             save_file = f'{self.save_path}/' + dataset + '.pkl'
         with open(save_file, 'wb') as f:
-            pickle.dump((mol_graphs_pos, labels_pos, prot_seqs_pos, prots_mask_pos, mol_graphs_neg, labels_neg,
-                         prot_seqs_neg, prots_mask_neg), f)
+            pickle.dump((mol_graphs, prot_seqs, prots_mask, labels), f)
 
     def prot_emb(self, seq):
         re = torch.zeros(self.max_protein_len, dtype=torch.int64)
