@@ -58,7 +58,7 @@ class Mymodel(torch.nn.Module):
         if self.args.causal_inference:
             self.mlp = OutMLP(self.hidden_size * 2, 1)  # global
             self.cmlp = OutMLP(self.hidden_size * 2, 1)  # causal
-            self.smlp = OutMLP(self.hidden_size * 2, 1)  # shortcut
+            self.smlp = OutMLP(self.hidden_size * 2, 2)  # shortcut
             feat_size = self.hidden_size * 4 if self.args.cat_or_add == 'cat' else self.hidden_size * 2
             self.intervmlp = OutMLP(feat_size, 1)  # intervention
         else:
@@ -106,6 +106,7 @@ class Mymodel(torch.nn.Module):
         pred = self.mlp(h)
 
         if training and self.args.causal_inference:
+            """这里现在先不跑呢"""
             if self.args.node_attn:
                 # sigmoid
                 # node_att = torch.sigmoid(self.node_att_mlp(node_feat))

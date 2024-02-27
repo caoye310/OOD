@@ -52,9 +52,15 @@ class Collator_fn(object):
         '''
         graphs_pos, protein_pos, prot_mask_pos, labels_pos, graphs_neg, protein_neg, prot_mask_neg, labels_neg = map(
             list, zip(*samples))
-        pk_values = torch.LongTensor(labels_pos + labels_neg)
-        batched_graph = dgl.batch(graphs_pos + graphs_neg)
-        batched_prots = torch.LongTensor(torch.stack(protein_pos + protein_neg))
-        batched_prots_mask = torch.stack(prot_mask_pos + prot_mask_neg)
+        pk_values_pos = torch.LongTensor(labels_pos)
+        batched_graph_pos = dgl.batch(graphs_pos)
+        batched_prots_pos = torch.LongTensor(torch.stack(protein_pos))
+        batched_prots_mask_pos = torch.stack(prot_mask_pos)
 
-        return batched_graph, batched_prots, batched_prots_mask, pk_values
+        pk_values_neg = torch.LongTensor(labels_neg)
+        batched_graph_neg = dgl.batch(graphs_neg)
+        batched_prots_neg = torch.LongTensor(torch.stack(protein_neg))
+        batched_prots_mask_neg = torch.stack(prot_mask_neg)
+
+        return batched_graph_pos, batched_prots_pos, batched_prots_mask_pos, pk_values_pos, \
+               batched_graph_neg, batched_prots_neg, batched_prots_mask_neg, pk_values_neg

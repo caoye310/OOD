@@ -68,12 +68,11 @@ class ProTrans(nn.Module):
                 for _ in range(num_attn_layer)
             ]
         )
-        # self.lstm = nn.LSTM(input_size=hidden_size, hidden_size=hidden_size, num_layers=num_lstm_layer,
-                            # batch_first=True, dropout=dropout)  # 这个玩意儿是这么用的吗？回头再看看
+        self.lstm = nn.LSTM(input_size=hidden_size, hidden_size=hidden_size, num_layers=num_lstm_layer,
+                            batch_first=True, dropout=dropout)  # 这个玩意儿是这么用的吗？回头再看看
         self.mlp = MLP(hidden_size, hidden_size, ffn_hidden_size)
 
     def forward(self, protein, prot_mask):
-        self.lstm.flatten_parameters()
         prot_encode = self.embedding(protein)
 
         prot_mask = prot_mask.unsqueeze(1).unsqueeze(2)
@@ -81,9 +80,9 @@ class ProTrans(nn.Module):
 
         for layer in self.layers:
             prot_encode = layer(prot_encode.float(), prot_mask.float())
-        # prot_encode, _ = self.lstm(prot_encode)
-        # output = self.mlp(prot_encode)
-        return prot_encode
+        prot_encode, _ = self.lstm(prot_encode)
+        output = self.mlp(prot_encode)
+        return output
 
 
 class Encoder(nn.Module):
