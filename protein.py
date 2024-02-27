@@ -56,8 +56,9 @@ class MLP(torch.nn.Module):
 
 class ProTrans(nn.Module):
     def __init__(self, vocab_size, hidden_size, max_position_size, num_attn_layer, num_lstm_layer, num_attn_heads,
-                 ffn_hidden_size, dropout):
+                 ffn_hidden_size, lstm, dropout):
         super(ProTrans, self).__init__()
+        self.lstm = lstm
         self.embedding = Embeddings(vocab_size, hidden_size, max_position_size, dropout)
         self.layers = nn.ModuleList(
             [
@@ -68,8 +69,9 @@ class ProTrans(nn.Module):
                 for _ in range(num_attn_layer)
             ]
         )
-        self.lstm = nn.LSTM(input_size=hidden_size, hidden_size=hidden_size, num_layers=num_lstm_layer,
-                            batch_first=True, dropout=dropout)  # 这个玩意儿是这么用的吗？回头再看看
+        if self.lstm:
+            self.lstm_layer = nn.LSTM(input_size=hidden_size, hidden_size=hidden_size, num_layers=num_lstm_layer,
+                                      batch_first=True, dropout=dropout)  # 这个玩意儿是这么用的吗？回头再看看
         self.mlp = MLP(hidden_size, hidden_size, ffn_hidden_size)
 
     def forward(self, protein, prot_mask):
@@ -79,9 +81,12 @@ class ProTrans(nn.Module):
         prot_mask = (1.0 - prot_mask) * -10000.0
 
         for layer in self.layers:
-            prot_encode = layer(prot_encode.float(), prot_mask.float())
-        prot_encode, _ = self.lstm(prot_encode)
-        output = self.mlp(prot_encode)
+            output = layer(prot_encode.float(), prot_mask.float())
+        if self.lstm:
+            self.lstm_layer.flatten_parameters()
+            prot_encode, _ = self.lstm_layer(output)
+            output = self.mlp(prot_encode)
+
         return output
 
 

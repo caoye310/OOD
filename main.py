@@ -57,10 +57,9 @@ def parse_args():
     parser.add_argument("--patience", type=int, default=10)
     # Model setting
     parser.add_argument('--readout', default='last', type=str)
-    parser.add_argument('--layer_norm', default=0, type=bool)
+    parser.add_argument('--layer_norm', default=1, type=bool)
     # parser.add_argument('--emb_size', default=512, type=int)
-    parser.add_argument('--hidden_size', default=192, type=int)
-    parser.add_argument('--base_res', default=1, type=bool, help='residual connection in base GNN')
+    parser.add_argument('--hidden_size', default=128, type=int)
     parser.add_argument('--residual', default=1, type=bool,
                         help='residual connection for causal graph and shortcut graph learning')
     parser.add_argument('--dropout', default=0.1, type=float)
@@ -77,18 +76,19 @@ def parse_args():
     parser.add_argument('--interaction', type=str, default='concat', choices=['concat', 'bilinear'],
                         help='The way to get interaction features of molecule and protein')
     parser.add_argument('--max_protein_len', type=int, default=1000, help='Max length of protein sequence')
-    parser.add_argument('--num_attn_layer', type=int, default=2, help='')
+    parser.add_argument('--lstm', type=bool, default=1, help='')
     parser.add_argument('--num_lstm_layer', type=int, default=2, help='')
-    parser.add_argument('--num_attn_head_prot', type=int, default=12, help='')
+    parser.add_argument('--num_attn_layer', type=int, default=2, help='')
+    parser.add_argument('--num_attn_head_prot', type=int, default=8, help='')
     # Loss
     parser.add_argument('--task', type=str, default='DTI', choices=['DTI', 'DDI'])
     parser.add_argument('--distribution', type=str, default='uniform', choices=['uniform', 'normal'])
     parser.add_argument('--with_random', type=int, default=1, help='interaction way')
-    parser.add_argument('--cat_or_add', type=str, default='cat', choices=['cat', 'add'])
+    parser.add_argument('--cat_or_add', type=str, default='add', choices=['cat', 'add'])
     parser.add_argument('--shortcut_loss', type=str, default='KL', choices=['MSE', 'KL'], help='shortcut graph loss')
-    parser.add_argument("--lam1", type=float, default=0.1, help='the weight of causal loss')
-    parser.add_argument("--lam2", type=float, default=0.1, help='the weight of inv loss')
-    parser.add_argument("--lam3", type=float, default=0.1, help='the weight of inv loss')
+    parser.add_argument("--lam1", type=float, default=0.5, help='the weight of causal loss')
+    parser.add_argument("--lam2", type=float, default=0.5, help='the weight of inv loss')
+    parser.add_argument("--lam3", type=float, default=0., help='the weight of inv loss')
     parser.add_argument("--margin", type=float, default=0.8, help='parameter of MarginRankLoss')
     # save path
     parser.add_argument("--save_path", type=str, default='./results')
@@ -158,35 +158,45 @@ def training(args, model, train_dataloader, opt, loss_fct):
                                            torch.FloatTensor(np.array(label)).to(args.device)
         if args.causal_inference:
 
-            pred, c_pred, s_pred, interv_pred = model(graph, protein, prot_mask, training=True)
-            pred, c_pred, s_pred, interv_pred = pred.view(-1), c_pred.view(-1), s_pred.view(-1), interv_pred.view(-1)
+            pred, c_pred, s_pred_mol, s_pred_prot, interv_pred = model(graph, protein, prot_mask, training=True)
+            pred, c_pred, s_pred_mol, s_pred_prot, interv_pred = pred.view(-1), c_pred.view(-1), s_pred_mol, \
+                                                                 s_pred_prot, interv_pred.view(-1)
 
             if args.distribution == 'uniform':
                 if args.shortcut_loss == 'KL':
-                    target_s = torch.ones((len(s_pred), 2), dtype=torch.float).to(args.device) / 2  # binary classification
+                    target_s = torch.ones_like(s_pred_mol, dtype=torch.float).to(args.device) / 2  # binary classification
                 if args.shortcut_loss == 'MSE':
-                    target_s = torch.ones_like(s_pred, dtype=torch.float).to(args.device) / 2  # binary classification
+                    target_s = torch.ones_like(s_pred_mol, dtype=torch.float).to(args.device) / 2  # binary classification
             else:
                 if args.shortcut_loss == 'KL':
-                    target_s = torch.randn(len(s_pred), 2, dtype=torch.float32).to(args.device)
+                    target_s = torch.randn((len(s_pred_mol), 2), dtype=torch.float32).to(args.device)
                     target_s = torch.softmax(target_s, dim=-1)
                 if args.shortcut_loss == 'MSE':
-                    target_s = torch.randn(len(s_pred), dtype=torch.float32).to(args.device)
+                    target_s = torch.randn(len(s_pred_mol), dtype=torch.float32).to(args.device)
                     target_s = torch.sigmoid(target_s)
             if args.shortcut_loss == 'KL':
-                s_pred = torch.log(torch.stack((torch.sigmoid(s_pred), 1 - torch.sigmoid(s_pred)), dim=1))
-                s_loss = F.kl_div(s_pred, target_s, reduction='batchmean')
+                # s_pred_mol = torch.log(torch.stack((torch.sigmoid(s_pred_mol), 1 - torch.sigmoid(s_pred_mol)), dim=1))
+                s_pred_mol = torch.softmax(s_pred_mol, dim=-1)
+                s_pred_mol = torch.log(s_pred_mol)
+                s_loss_mol = F.kl_div(s_pred_mol, target_s, reduction='batchmean')
+                # s_pred_prot = torch.log(torch.stack((torch.sigmoid(s_pred_prot), 1 - torch.sigmoid(s_pred_prot)), dim=1))
+                s_pred_prot = torch.softmax(s_pred_prot, dim=-1)
+                s_pred_prot = torch.log(s_pred_prot)
+                s_loss_prot = F.kl_div(s_pred_prot, target_s, reduction='batchmean')
             if args.shortcut_loss == 'MSE':
-                s_loss = F.mse_loss(torch.sigmoid(s_pred), target_s, reduction='mean')
+                s_loss_mol = F.mse_loss(torch.sigmoid(s_pred_mol), target_s, reduction='mean')
+                s_loss_prot = F.mse_loss(torch.sigmoid(s_pred_prot), target_s, reduction='mean')
 
             loss_global = loss_fct(torch.sigmoid(pred), label)
+            loss_causal = loss_fct(torch.sigmoid(c_pred), label)
             loss_inv = loss_fct(torch.sigmoid(interv_pred), label)
+
             pred = torch.sigmoid(pred)
             c_pred = torch.sigmoid(c_pred)
             loss_dist = F.kl_div(torch.log(torch.stack((pred, 1 - pred), dim=1)),
                                  torch.stack((c_pred, 1 - c_pred), dim=1), reduction='batchmean')
-            print(round(loss_global.item(), 4), round(loss_inv.item(), 4), round(loss_dist.item()), round(s_loss.item(), 4))
-            loss = loss_global + args.lam1 * s_loss + args.lam2 * loss_inv + args.lam3 * loss_dist
+
+            loss = loss_global + loss_causal + args.lam1 * (s_loss_mol + s_loss_prot) + args.lam2 * loss_inv + args.lam3 * loss_dist
         else:
             pred = model(graph, protein, prot_mask, training=True).view(-1)
             loss = loss_fct(torch.sigmoid(pred), label)
@@ -206,9 +216,9 @@ def main(args):
     save_path = f'{args.save_path}/{args.dataset}/{args.GNNConv}/' \
                 f'lr{args.lr}_weight_decay{args.wd}_hsize{args.hidden_size}_layer{args.layer_num}' \
                 f'_pool{args.graph_pool}_layer_norm{args.layer_norm}_sloss_{args.shortcut_loss}' \
-                f'_lambda{args.lam1}_{args.lam2}_{args.lam3}_res{args.base_res}_{args.residual}_interaction{args.interaction}' \
+                f'_lambda{args.lam1}_{args.lam2}_{args.lam3}_res_{args.residual}_interaction{args.interaction}' \
                 f'_causal{args.causal_inference}_margin{args.margin}_drop{args.dropout}_prot{args.num_attn_layer}_' \
-                f'{args.num_attn_head_prot}_{args.num_lstm_layer}/'
+                f'{args.num_attn_head_prot}_{args.num_lstm_layer}_lstm{args.lstm}/'
 
     os.makedirs(f'{save_path}/model', exist_ok=True)
     args.save_graph = f'{args.save_graph}_{args.dataset}'

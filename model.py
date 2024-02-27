@@ -3,20 +3,20 @@ from GNN import GNN
 import torch.nn as nn
 import dgl
 from dgl.nn.pytorch import AvgPooling, MaxPooling, SumPooling, WeightAndSum, Set2Set
-from torch.nn import Linear
+from torch.nn import Linear, BatchNorm1d
 import torch.nn.functional as F
 import random
-from protein import ProTrans, MLP
+from protein import ProTrans
 
 
 class OutMLP(torch.nn.Module):
     def __init__(self, in_feats, out_feats):
         super(OutMLP, self).__init__()
         self.mlp = nn.Sequential(
-            Linear(in_feats, 256),
+            BatchNorm1d(in_feats),
+            Linear(in_feats, 128),
             nn.ReLU(),
-            Linear(256, 128),
-            nn.ReLU(),
+            BatchNorm1d(128),
             Linear(128, out_feats),
         )
 
@@ -29,15 +29,15 @@ class Mymodel(torch.nn.Module):
     def __init__(self, args):
         super(Mymodel, self).__init__()
         self.args = args
-        self.gnn = GNN(args, input_size=39, num_layer=args.layer_num, residual=args.base_res)
+        self.gnn = GNN(args, input_size=39, num_layer=args.layer_num, residual=args.residual)
         self.softmax = torch.nn.Softmax()
         self.hidden_size = args.hidden_size
-        self.prot_att_mlp = MLP(in_feats=self.hidden_size, out_feats=2, hidden_size=self.hidden_size)  # edge attention
-        self.node_att_mlp = MLP(in_feats=self.hidden_size, out_feats=2, hidden_size=self.hidden_size)  # node attention
+        self.prot_att_mlp = Linear(self.hidden_size, 2)  # prot attention
+        self.node_att_mlp = Linear(self.hidden_size, 2)  # node attention
 
         self.prot_encoder = ProTrans(21, self.hidden_size, args.max_protein_len, num_attn_layer=args.num_attn_layer,
                                      num_lstm_layer=args.num_lstm_layer, num_attn_heads=args.num_attn_head_prot,
-                                     ffn_hidden_size=self.hidden_size, dropout=args.dropout)
+                                     ffn_hidden_size=self.hidden_size, lstm=args.lstm, dropout=args.dropout)
 
         if self.args.interaction == 'bilinear':
             self.bilinear_global = nn.Bilinear(self.hidden_size, self.hidden_size, self.hidden_size * 2)
@@ -58,7 +58,8 @@ class Mymodel(torch.nn.Module):
         if self.args.causal_inference:
             self.mlp = OutMLP(self.hidden_size * 2, 1)  # global
             self.cmlp = OutMLP(self.hidden_size * 2, 1)  # causal
-            self.smlp = OutMLP(self.hidden_size * 2, 1)  # shortcut
+            self.smlp_mol = OutMLP(self.hidden_size, 2)  # molecule shortcut
+            self.smlp_prot = OutMLP(self.hidden_size, 2)  # protein shortcut
             feat_size = self.hidden_size * 4 if self.args.cat_or_add == 'cat' else self.hidden_size * 2
             self.intervmlp = OutMLP(feat_size, 1)  # intervention
         else:
@@ -116,16 +117,16 @@ class Mymodel(torch.nn.Module):
                 xc = node_att[:, 0].view(-1, 1) * node_feat
                 xs = node_att[:, 1].view(-1, 1) * node_feat
             else:
-                xc = node_feat
-                xs = node_feat
+                xc = node_feat * 0.5
+                xs = node_feat * 0.5
 
             if self.args.prot_attn:
                 prot_att = F.softmax(self.prot_att_mlp(prot_feat), dim=-1)
                 pc = prot_att[:, :, 0].squeeze().unsqueeze(2).expand_as(prot_feat) * prot_feat
                 ps = prot_att[:, :, 1].squeeze().unsqueeze(2).expand_as(prot_feat) * prot_feat
             else:
-                pc = prot_feat
-                ps = prot_feat
+                pc = prot_feat * 0.5
+                ps = prot_feat * 0.5
 
             # causal
             graph.ndata.update({'x': xc})
@@ -146,13 +147,14 @@ class Mymodel(torch.nn.Module):
                 s_h = self.bilinear_shortcut(s_graph_h, s_prot_h)
 
             c_logit = self.cmlp(c_h)
-            s_logit = self.smlp(s_h)
+            s_mol_logit = self.smlp_mol(s_graph_h)
+            s_prot_logit = self.smlp_prot(s_prot_h)
 
             # backdoor adjustment
             x_interv = self.random_readout_layer(c_h, s_h)
             interv_logit = self.intervmlp(x_interv)
 
-            return pred, c_logit, s_logit, interv_logit
+            return pred, c_logit, s_mol_logit, s_prot_logit, interv_logit
 
         else:
             return pred
