@@ -10,7 +10,7 @@ import rdkit
 from rdkit import Chem
 import json
 # protein
-seq_voc = "ACDEFGHIKLMNPQRSTVWXY"
+seq_voc = "ABCDEFGHIKLMNPQRSTVWXY"
 seq_dict = {v: i + 1 for i, v in enumerate(seq_voc)}
 seq_dict_len = len(seq_dict)
 

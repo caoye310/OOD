@@ -32,12 +32,17 @@ class Mymodel(torch.nn.Module):
         self.gnn = GNN(args, input_size=39, num_layer=args.layer_num, residual=args.residual)
         self.softmax = torch.nn.Softmax()
         self.hidden_size = args.hidden_size
-        self.prot_att_mlp = Linear(self.hidden_size, 2)  # prot attention
-        self.node_att_mlp = Linear(self.hidden_size, 2)  # node attention
+        self.prot_att_mlp = Linear(self.hidden_size, 1)  # prot attention
+        self.node_att_mlp = Linear(self.hidden_size, 1)  # node attention
 
-        self.prot_encoder = ProTrans(21, self.hidden_size, args.max_protein_len, num_attn_layer=args.num_attn_layer,
+        self.prot_encoder = ProTrans(22, self.hidden_size, args.max_protein_len, num_attn_layer=args.num_attn_layer,
                                      num_lstm_layer=args.num_lstm_layer, num_attn_heads=args.num_attn_head_prot,
                                      ffn_hidden_size=self.hidden_size, lstm=args.lstm, dropout=args.dropout)
+
+        self.mix_causal_shortcut = nn.Sequential(nn.Linear(self.hidden_size * 4, self.hidden_size * 2),
+                                      nn.BatchNorm1d(self.hidden_size * 2),
+                                      nn.ReLU(),
+                                      nn.Linear(self.hidden_size * 2, self.hidden_size * 2))
 
         if self.args.interaction == 'bilinear':
             self.bilinear_global = nn.Bilinear(self.hidden_size, self.hidden_size, self.hidden_size * 2)
@@ -58,38 +63,26 @@ class Mymodel(torch.nn.Module):
         if self.args.causal_inference:
             self.mlp = OutMLP(self.hidden_size * 2, 1)  # global
             self.cmlp = OutMLP(self.hidden_size * 2, 1)  # causal
-            self.smlp_mol = OutMLP(self.hidden_size, 2)  # molecule shortcut
-            self.smlp_prot = OutMLP(self.hidden_size, 2)  # protein shortcut
-            feat_size = self.hidden_size * 4 if self.args.cat_or_add == 'cat' else self.hidden_size * 2
-            self.intervmlp = OutMLP(feat_size, 1)  # intervention
+            self.smlp = OutMLP(self.hidden_size * 2, 1)  # molecule shortcut
+            self.intervmlp = OutMLP(self.hidden_size * 2, 1)  # intervention
         else:
             self.mlp = OutMLP(self.hidden_size * 2, 1)
 
     def random_readout_layer(self, xc, xs):
-
         num = xc.shape[0]
         l = [i for i in range(num)]
         if self.args.with_random:
             random.shuffle(l)
         random_idx = torch.tensor(l)
-        if self.args.cat_or_add == "cat":
-            x = torch.cat((xc, xs[random_idx]), dim=1)
-        else:
-            x = xc + xs[random_idx]
-
+        x = torch.cat((xc, xs[random_idx]), dim=1)
+        x = self.mix_causal_shortcut(x)
         return x
 
-    def node_feat_size(self, graph, node_feat):
-        graph.ndata.update({'x': node_feat})
-        tmp_graph = dgl.unbatch(graph)
-
-        N = torch.LongTensor([len(g.ndata['x']) for g in tmp_graph])  # number of nodes in a batch
-        max_N = N.max().item()
-        tmp_feat = torch.zeros(size=[len(tmp_graph), max_N, node_feat.shape[1]], dtype=torch.float32).to(
-            node_feat.device)
-        for i, g in enumerate(tmp_graph):
-            tmp_feat[i, :N[i], :] = g.ndata['x']
-        return tmp_feat
+    def simsiam_loss(self, causal_rep, mix_rep):
+        causal_rep = causal_rep.detach()
+        causal_rep = F.normalize(causal_rep, dim=1)
+        mix_rep = F.normalize(mix_rep, dim=1)
+        return -(causal_rep * mix_rep).sum(dim=1).mean()
 
     def forward(self, graph, protein, prot_mask, training=False):
         node_feat = graph.ndata['x']
@@ -113,17 +106,17 @@ class Mymodel(torch.nn.Module):
                 # xc = node_att * node_feat  # causal node features
                 # xs = (1 - node_att) * node_feat  # shortcut node features
                 # softmax
-                node_att = F.softmax(self.node_att_mlp(node_feat), dim=-1)
-                xc = node_att[:, 0].view(-1, 1) * node_feat
-                xs = node_att[:, 1].view(-1, 1) * node_feat
+                node_att = torch.sigmoid(self.node_att_mlp(node_feat))
+                xc = node_att * node_feat
+                xs = (1 - node_att) * node_feat
             else:
                 xc = node_feat * 0.5
                 xs = node_feat * 0.5
 
             if self.args.prot_attn:
-                prot_att = F.softmax(self.prot_att_mlp(prot_feat), dim=-1)
-                pc = prot_att[:, :, 0].squeeze().unsqueeze(2).expand_as(prot_feat) * prot_feat
-                ps = prot_att[:, :, 1].squeeze().unsqueeze(2).expand_as(prot_feat) * prot_feat
+                prot_att = torch.sigmoid(self.prot_att_mlp(prot_feat))
+                pc = prot_att.expand_as(prot_feat) * prot_feat
+                ps = (1 - prot_att).expand_as(prot_feat) * prot_feat
             else:
                 pc = prot_feat * 0.5
                 ps = prot_feat * 0.5
@@ -147,14 +140,13 @@ class Mymodel(torch.nn.Module):
                 s_h = self.bilinear_shortcut(s_graph_h, s_prot_h)
 
             c_logit = self.cmlp(c_h)
-            s_mol_logit = self.smlp_mol(s_graph_h)
-            s_prot_logit = self.smlp_prot(s_prot_h)
+            # s_logit = self.smlp(s_h)
 
             # backdoor adjustment
             x_interv = self.random_readout_layer(c_h, s_h)
-            interv_logit = self.intervmlp(x_interv)
+            simsiam_loss = self.simsiam_loss(c_h, x_interv)
 
-            return pred, c_logit, s_mol_logit, s_prot_logit, interv_logit
-
+            loss_reg = torch.abs(c_h / (c_h + s_h) - self.args.gamma * torch.ones_like(c_h)).mean()
+            return c_logit, simsiam_loss, loss_reg
         else:
             return pred
