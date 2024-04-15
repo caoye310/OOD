@@ -44,6 +44,9 @@ class Collator_fn(object):
         Generate batched graphs.
         '''
         graphs, protein, prot_mask, labels = map(list, zip(*samples))
+        for i in range(len(graphs)):
+            node_graph_id = torch.LongTensor([i for _ in range(graphs[i].num_nodes())]).view(-1, 1)
+            graphs[i].ndata['batch'] = node_graph_id
         pk_values = torch.LongTensor(labels)
         batched_graph = dgl.batch(graphs)
         batched_prots = torch.LongTensor(torch.stack(protein))

@@ -35,18 +35,17 @@ def set_seeds(seed):
 def parse_args():
     parser = argparse.ArgumentParser(description="Arguments for training")
     parser.add_argument("--DEBUG", type=bool, default=0)
-    parser.add_argument('--device', default='cuda:1', type=str)
-    parser.add_argument('--num_workers', default=0, type=int)
-    parser.add_argument('--repeat', type=int, default=5, help='')
+    parser.add_argument('--device', default='cuda:0', type=str)
+    parser.add_argument('--num_workers', default=4, type=int)
     # dataset
-    parser.add_argument('--dataset', default='sbap_core_ic50_size', type=str, help='name of data set')
+    parser.add_argument('--dataset', default='sbap_core_potency_assay', type=str, help='name of data set')
     parser.add_argument('--root', default='/mnt/hdd1/caoye/OOD/dataset/drugood_all/',
                         type=str, help='root of input data')
     parser.add_argument('--save_graph', default='./processed/graph', type=str,
                         help='path of graphs')
     # Training parameters
     parser.add_argument('--epochs', default=300, type=int, metavar='N', help='number of total epochs to run')
-    parser.add_argument('-b', '--batch_size', default=28, type=int, metavar='N',
+    parser.add_argument('-b', '--batch_size', default=32, type=int, metavar='N',
                         help='mini-batch size (default: 128), this is the total '
                              'batch size of all GPUs on the current node when '
                              'using Data Parallel or Distributed Data Parallel')
@@ -66,35 +65,42 @@ def parse_args():
     parser.add_argument("--graph_pool", type=str, default='mean', choices=['sum', 'max', 'mean', 'wsum', 'set2set'],
                         help='Pooling graph node')
     parser.add_argument("--layer_num", type=int, default=3, help='Number of layer in base GNN.')
-    parser.add_argument('--GNNConv', type=str, default='GCN', choices=['GCN', 'GAT', 'SAGE', 'GIN'])
+    parser.add_argument('--GNNConv', type=str, default='GCN', choices=['GIN', 'GAT', 'SAGE', 'GIN'])
     parser.add_argument('--num_heads', type=int, default=4)
     parser.add_argument('--node_attn', type=bool, default=1,
                         help='Whether divide molecule graph to causal and shortcut graph')
-    parser.add_argument('--prot_attn', type=bool, default=1,
-                        help='')
+    parser.add_argument('--prot_attn', type=bool, default=1, help='')
     parser.add_argument('--causal_inference', type=bool, default=1, help='')
     parser.add_argument('--interaction', type=str, default='concat', choices=['concat', 'bilinear'],
                         help='The way to get interaction features of molecule and protein')
     parser.add_argument('--max_protein_len', type=int, default=1000, help='Max length of protein sequence')
     parser.add_argument('--lstm', type=bool, default=1, help='')
-    parser.add_argument('--num_lstm_layer', type=int, default=2, help='')
-    parser.add_argument('--num_attn_layer', type=int, default=2, help='')
-    parser.add_argument('--num_attn_head_prot', type=int, default=8, help='')
+    parser.add_argument('--num_lstm_layer', type=int, default=2, help='Number of LSTM layers')
+    parser.add_argument('--num_attn_layer', type=int, default=2,
+                        help='Number of multi-head attention layers in Protein Encoder')
+    parser.add_argument('--num_attn_head_prot', type=int, default=8,
+                        help='Number of multi-head attention heads in Protein Encoder')
     # Loss
-    parser.add_argument('--task', type=str, default='DTI', choices=['DTI', 'DDI'])
-    parser.add_argument('--distribution', type=str, default='uniform', choices=['uniform', 'normal'])
+    parser.add_argument('--distribution', type=str, default='uniform', choices=['uniform', 'normal'],
+                        help='distribution of shortcut features')
     parser.add_argument('--with_random', type=int, default=1, help='interaction way')
-    parser.add_argument('--cat_or_add', type=str, default='add', choices=['cat', 'add'])
-    parser.add_argument('--shortcut_loss', type=str, default='KL', choices=['MSE', 'KL'], help='shortcut graph loss')
-    parser.add_argument("--lam1", type=float, default=0.5, help='the weight of causal loss')
-    parser.add_argument("--lam2", type=float, default=0.5, help='the weight of inv loss')
-    parser.add_argument("--lam3", type=float, default=0., help='the weight of inv loss')
-    parser.add_argument("--margin", type=float, default=0.8, help='parameter of MarginRankLoss')
+    parser.add_argument('--shortcut_loss', type=str, default='KL', choices=['MSE', 'KL'], help='shortcut loss')
+    parser.add_argument("--lam0", type=float, default=1, help='the weight of shortcut loss')
+    parser.add_argument("--lam1", type=float, default=0.001, help='the weight of shortcut loss')
+    parser.add_argument("--lam2", type=float, default=0.01, help='the weight of inv loss')
+    parser.add_argument("--lam3", type=float, default=0.01, help='the weight of reg loss')
+    parser.add_argument("--gamma1", type=float, default=0.9, help='Ratio of causal substructure in molecule')
+    parser.add_argument("--gamma2", type=float, default=0.8, help='Ratio of causal substructure in protein')
     # save path
     parser.add_argument("--save_path", type=str, default='./results')
     args = parser.parse_args()
     return args
 
+
+# sensitivity study: shortcut loss: 0.01, 0.1, 1
+#                    causal loss: 0.1, 0.01, 0.001
+#                    inv loss: 0.1, 0.001, 1
+#                    reg loss: 0.1, 0.001, 1
 
 def calcu_metric(y_true, y_pred):
     fpr, tpr, thresholds = roc_curve(y_true, y_pred)
@@ -158,15 +164,17 @@ def training(args, model, train_dataloader, opt, loss_fct):
                                            torch.FloatTensor(np.array(label)).to(args.device)
         if args.causal_inference:
 
-            pred, c_pred, s_pred_mol, s_pred_prot, interv_pred = model(graph, protein, prot_mask, training=True)
-            pred, c_pred, s_pred_mol, s_pred_prot, interv_pred = pred.view(-1), c_pred.view(-1), s_pred_mol, \
-                                                                 s_pred_prot, interv_pred.view(-1)
+            pred, c_pred, s_pred_mol, s_pred_prot, interv_pred, loss_reg = model(graph, protein, prot_mask,
+                                                                                 training=True)
+            pred, c_pred, interv_pred = pred.view(-1), c_pred.view(-1), interv_pred.view(-1)
 
             if args.distribution == 'uniform':
                 if args.shortcut_loss == 'KL':
-                    target_s = torch.ones_like(s_pred_mol, dtype=torch.float).to(args.device) / 2  # binary classification
+                    target_s = torch.ones_like(s_pred_mol, dtype=torch.float).to(
+                        args.device) / 2  # binary classification
                 if args.shortcut_loss == 'MSE':
-                    target_s = torch.ones_like(s_pred_mol, dtype=torch.float).to(args.device) / 2  # binary classification
+                    target_s = torch.ones_like(s_pred_mol, dtype=torch.float).to(
+                        args.device) / 2  # binary classification
             else:
                 if args.shortcut_loss == 'KL':
                     target_s = torch.randn((len(s_pred_mol), 2), dtype=torch.float32).to(args.device)
@@ -190,13 +198,10 @@ def training(args, model, train_dataloader, opt, loss_fct):
             loss_global = loss_fct(torch.sigmoid(pred), label)
             loss_causal = loss_fct(torch.sigmoid(c_pred), label)
             loss_inv = loss_fct(torch.sigmoid(interv_pred), label)
-
-            pred = torch.sigmoid(pred)
-            c_pred = torch.sigmoid(c_pred)
-            loss_dist = F.kl_div(torch.log(torch.stack((pred, 1 - pred), dim=1)),
-                                 torch.stack((c_pred, 1 - c_pred), dim=1), reduction='batchmean')
-
-            loss = loss_global + loss_causal + args.lam1 * (s_loss_mol + s_loss_prot) + args.lam2 * loss_inv + args.lam3 * loss_dist
+            # print(round(loss_global.item(), 4), round(loss_causal.item(), 4), round(s_loss_mol.item(), 4),
+            # round(s_loss_prot.item(), 4), round(loss_inv.item(), 4), round(loss_reg.item(), 4))
+            loss = loss_global + args.lam0 * loss_causal + args.lam1 * (
+                        s_loss_mol + s_loss_prot) + args.lam2 * loss_inv + args.lam3 * loss_reg
         else:
             pred = model(graph, protein, prot_mask, training=True).view(-1)
             loss = loss_fct(torch.sigmoid(pred), label)
@@ -214,11 +219,11 @@ def main(args):
     print(args)
     print('[INFO] Preparing data ... ')
     save_path = f'{args.save_path}/{args.dataset}/{args.GNNConv}/' \
-                f'lr{args.lr}_weight_decay{args.wd}_hsize{args.hidden_size}_layer{args.layer_num}' \
+                f'prot_attn_{args.prot_attn}' \
                 f'_pool{args.graph_pool}_layer_norm{args.layer_norm}_sloss_{args.shortcut_loss}' \
-                f'_lambda{args.lam1}_{args.lam2}_{args.lam3}_res_{args.residual}_interaction{args.interaction}' \
-                f'_causal{args.causal_inference}_margin{args.margin}_drop{args.dropout}_prot{args.num_attn_layer}_' \
-                f'{args.num_attn_head_prot}_{args.num_lstm_layer}_lstm{args.lstm}/'
+                f'_lambda_{args.lam0}_{args.lam1}_{args.lam2}_{args.lam3}_res_{args.residual}_interaction{args.interaction}' \
+                f'_causal{args.causal_inference}_drop{args.dropout}_prot{args.num_attn_layer}_' \
+                f'{args.num_attn_head_prot}_{args.num_lstm_layer}_lstm{args.lstm}_gamma{args.gamma1}_{args.gamma2}_backdoor/'
 
     os.makedirs(f'{save_path}/model', exist_ok=True)
     args.save_graph = f'{args.save_graph}_{args.dataset}'
@@ -305,8 +310,8 @@ def main(args):
 
 if __name__ == '__main__':
     args = parse_args()
-    args.num_run = 0
+    args.num_run = 2
     print(f'This is repeat {args.num_run}')
-    set_seeds(222 + 2 ^ args.num_run)
+    set_seeds(111 + 2 ^ args.num_run)
     main(args)
     print('Done~~~')

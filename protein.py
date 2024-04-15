@@ -71,7 +71,7 @@ class ProTrans(nn.Module):
         )
         if self.lstm:
             self.lstm_layer = nn.LSTM(input_size=hidden_size, hidden_size=hidden_size, num_layers=num_lstm_layer,
-                                      batch_first=True, dropout=dropout)  # 这个玩意儿是这么用的吗？回头再看看
+                                      batch_first=True, dropout=dropout)
         self.mlp = MLP(hidden_size, hidden_size, ffn_hidden_size)
 
     def forward(self, protein, prot_mask):

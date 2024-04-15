@@ -7,7 +7,6 @@ import numpy as np
 import pickle
 import dgl
 import rdkit
-from rdkit import Chem
 import json
 # protein
 seq_voc = "ACDEFGHIKLMNPQRSTVWXY"
@@ -216,7 +215,7 @@ class DrugOOD(InMemoryDataset):
         return feature
 
     def smiles2graph(self, smile):
-        mol = Chem.MolFromSmiles(smile)
+        mol = rdkit.Chem.MolFromSmiles(smile)
         if (mol is None):
             return None
         src = []
@@ -262,8 +261,8 @@ class DrugOOD(InMemoryDataset):
 
     def featurize_bonds(self, mol):
         feats = []
-        bond_types = [Chem.rdchem.BondType.SINGLE, Chem.rdchem.BondType.DOUBLE,
-                      Chem.rdchem.BondType.TRIPLE, Chem.rdchem.BondType.AROMATIC]
+        bond_types = [rdkit.Chem.rdchem.BondType.SINGLE, rdkit.Chem.rdchem.BondType.DOUBLE,
+                      rdkit.Chem.rdchem.BondType.TRIPLE, rdkit.Chem.rdchem.BondType.AROMATIC]
         for bond in mol.GetBonds():
             btype = bond_types.index(bond.GetBondType())
             # One bond between atom u and v corresponds to two edges (u, v) and (v, u)
