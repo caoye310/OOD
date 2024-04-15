@@ -39,7 +39,7 @@ def parse_args():
     parser.add_argument('--num_workers', default=4, type=int)
     # dataset
     parser.add_argument('--dataset', default='sbap_core_potency_assay', type=str, help='name of data set')
-    parser.add_argument('--root', default='/mnt/hdd1/caoye/OOD/dataset/drugood_all/',
+    parser.add_argument('--root', default='./drugood_all/',
                         type=str, help='root of input data')
     parser.add_argument('--save_graph', default='./processed/graph', type=str,
                         help='path of graphs')
